@@ -60,7 +60,7 @@ int parse_ims_pps_buffer(char *buf)
 /* Check if IMS is connected via PPS file */
 int ims_connected_pps(void)
 {
-    char buf[16384];
+    char buf[PPS_BUF_SIZE];
     if (read_file(PPS_IMS, buf, sizeof(buf)) < 0)
         return 0;
     return parse_ims_pps_buffer(buf);
@@ -105,7 +105,7 @@ static int set_icon(int on)
 /* Restore original BBM / RCP indicator state on shutdown */
 static void restore_bbio(void)
 {
-    char buf[16384];
+    char buf[PPS_BUF_SIZE];
     pps_decoder_t d;
     int on = 0;
 
@@ -158,7 +158,10 @@ static void *berry_monitor_thread(void *arg)
 
     while (g_berry_running)
     {
-        int pps_fd = open(PPS_IMS "?wait,delta", O_RDONLY | O_CLOEXEC);
+        /* O_NONBLOCK so read() returns EAGAIN instead of blocking until the next
+         * IMS change: the 5 s poll() timeout then gives a periodic re-check and
+         * a failed set_icon() is retried after 1 s */
+        int pps_fd = open(PPS_IMS "?wait,delta", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
         if (pps_fd < 0)
         {
             if (!warned)

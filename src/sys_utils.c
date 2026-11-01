@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <stdarg.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -12,7 +13,9 @@
 #include <dirent.h>
 #include <libgen.h>
 #include <limits.h>
+#include <ctype.h>
 #include <sys/wait.h>
+#include <sys/pps.h>
 
 char g_init_path[512] = {0};
 char g_data_path[512] = {0};
@@ -483,4 +486,76 @@ void init_addon_paths(void)
             snprintf(g_data_path, sizeof(g_data_path), "./data");
         }
     }
+}
+
+/* --- PPS attribute helpers --- */
+
+/* True if the '_'-separated segment ending right before p is a negation (NOT_, NO_) */
+static int negated_segment(const char *value, const char *p)
+{
+    const char *end = p - 1; /* points at the '_' */
+    const char *start = end;
+    while (start > value && isalnum((unsigned char)start[-1]))
+        start--;
+
+    size_t len = (size_t)(end - start);
+    return (len == 3 && strncasecmp(start, "NOT", 3) == 0) ||
+           (len == 2 && strncasecmp(start, "NO", 2) == 0);
+}
+
+/* True if token occurs in value as a whole word. The char before it must not be
+ * alphanumeric, and a '_' before it is accepted unless it follows a negation
+ * ("READY" matches "UICC_READY" but not "UNREADY" or "SIM_NOT_READY"). The char
+ * after it must not be alphanumeric ("ON" never matches "ONLINE", but "lte"
+ * still matches "lte_ca"). */
+int value_has_token(const char *value, const char *token)
+{
+    size_t tlen = token ? strlen(token) : 0;
+    if (!value || tlen == 0)
+        return 0;
+
+    for (const char *p = strstr(value, token); p; p = strstr(p + 1, token))
+    {
+        int left_ok = (p == value) ||
+                      (p[-1] == '_' ? !negated_segment(value, p) : !isalnum((unsigned char)p[-1]));
+        int right_ok = !isalnum((unsigned char)p[tlen]);
+        if (left_ok && right_ok)
+            return 1;
+    }
+    return 0;
+}
+
+/* Read one flat attribute of a PPS object into out; returns 1 if found */
+int pps_read_attr(const char *path, const char *attr, char *out, size_t len)
+{
+    char buf[PPS_BUF_SIZE];
+    if (!attr || !out || len == 0)
+        return 0;
+
+    int n = read_file(path, buf, sizeof(buf));
+    if (n < 0)
+        return 0;
+    if ((size_t)n == sizeof(buf) - 1)
+        LOG_VERBOSE("PPS object %s filled the %d-byte buffer and may be truncated", path, n);
+
+    char *ptr = buf;
+    pps_attrib_t info;
+    const char *attrs[] = {attr, NULL};
+
+    while (ppsparse(&ptr, NULL, attrs, &info, 0) > PPS_END)
+    {
+        if (info.attr_name && strcmp(info.attr_name, attr) == 0 && info.value)
+        {
+            snprintf(out, len, "%s", info.value);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Check that a PPS attribute contains token as a whole word (see value_has_token) */
+int pps_attr_has_token(const char *path, const char *attr, const char *token)
+{
+    char value[512];
+    return pps_read_attr(path, attr, value, sizeof(value)) && value_has_token(value, token);
 }

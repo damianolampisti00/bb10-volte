@@ -180,35 +180,12 @@ static void stats_on_failure(void)
 
 /* --- PPS checks and parsing --- */
 
-static int pps_check_attribute_contains(const char *pps_path, const char *attr_name, const char *expected_val)
-{
-    char buf[2048];
-    if (read_file(pps_path, buf, sizeof(buf)) < 0)
-        return 0;
-
-    char *ptr = buf;
-    pps_attrib_t info;
-    const char *attrs[] = {attr_name, NULL};
-
-    while (ppsparse(&ptr, NULL, attrs, &info, 0) > PPS_END)
-    {
-        if (info.attr_name && strcmp(info.attr_name, attr_name) == 0)
-        {
-            if (info.value && strstr(info.value, expected_val) != NULL)
-            {
-                return 1;
-            }
-        }
-    }
-    return 0;
-}
-
 static system_state_t get_current_system_state(void)
 {
     system_state_t state;
-    state.lte_ok = pps_check_attribute_contains(PPS_RADIO_PATH, "network_technology", "lte");
-    state.sim_ok = pps_check_attribute_contains(PPS_UICC_PATH, "uicc_state", "READY");
-    state.data_ok = pps_check_attribute_contains(PPS_DATA_PATH, "data_service_mode", "ON");
+    state.lte_ok = pps_attr_has_token(PPS_RADIO_PATH, "network_technology", "lte");
+    state.sim_ok = pps_attr_has_token(PPS_UICC_PATH, "uicc_state", "READY");
+    state.data_ok = pps_attr_has_token(PPS_DATA_PATH, "data_service_mode", "ON");
     return state;
 }
 
@@ -249,7 +226,7 @@ static void log_state_transition(system_state_t old_st, system_state_t new_st)
 
 static int incoming_ready_pps(void)
 {
-    if (!pps_check_attribute_contains(PPS_IMS, "allowVoLteProvisioning", "1"))
+    if (!pps_attr_has_token(PPS_IMS, "allowVoLteProvisioning", "1"))
         return 0;
 
     char buf2[256];
@@ -320,7 +297,7 @@ static void find_carrier_xml(char *out_path, size_t max_len)
 static void wait_for_lte(void)
 {
     int printed_log = 0;
-    while (!pps_check_attribute_contains(PPS_RADIO_PATH, "network_technology", "lte"))
+    while (!pps_attr_has_token(PPS_RADIO_PATH, "network_technology", "lte"))
     {
         if (!printed_log)
         {
@@ -340,10 +317,10 @@ static void wait_for_lte(void)
 
 static void ready_check(void)
 {
-    if (!pps_check_attribute_contains("/pps/services/phone/public/status", "phone_state", "idle"))
+    if (!pps_attr_has_token("/pps/services/phone/public/status", "phone_state", "idle"))
         bbe_exit_fail("CALL_ACTIVE", 1);
 
-    if (!pps_check_attribute_contains(PPS_UICC_PATH, "uicc_state", "READY"))
+    if (!pps_attr_has_token(PPS_UICC_PATH, "uicc_state", "READY"))
         bbe_exit_fail("SIM_NOT_READY", 1);
 
     if (!detect_sim_carrier())
@@ -351,7 +328,7 @@ static void ready_check(void)
 
     wait_for_lte();
 
-    if (!pps_check_attribute_contains(PPS_DATA_PATH, "data_service_mode", "ON"))
+    if (!pps_attr_has_token(PPS_DATA_PATH, "data_service_mode", "ON"))
         bbe_exit_fail("DATA_OFF", 1);
 }
 
@@ -597,6 +574,13 @@ static void *detailed_pps_monitor_thread(void *arg)
 
     while (g_lte_monitor_running)
     {
+        /* Retry objects that went away; poll() ignores negative fds meanwhile */
+        for (int i = 0; i < FD_COUNT; i++)
+        {
+            if (pfds[i].fd < 0)
+                pfds[i].fd = open(paths[i], O_RDONLY | O_NONBLOCK);
+        }
+
         int poll_res = poll(pfds, FD_COUNT, 1000);
 
         if (poll_res < 0)
@@ -606,9 +590,20 @@ static void *detailed_pps_monitor_thread(void *arg)
 
         for (int i = 0; i < FD_COUNT; i++)
         {
-            if (pfds[i].revents & (POLLIN | POLLPRI))
+            if (pfds[i].revents & (POLLHUP | POLLERR | POLLNVAL))
             {
-                char buf[1024];
+                /* PPS object removed (e.g. cellular service restart): reopen
+                 * instead of spinning on an fd that poll() keeps reporting */
+                LOG_VERBOSE("PPS %s hung up, reopening", paths[i]);
+                close(pfds[i].fd);
+                pfds[i].fd = open(paths[i], O_RDONLY | O_NONBLOCK);
+            }
+            else if (pfds[i].revents & (POLLIN | POLLPRI))
+            {
+                /* Drain the change notification. PPS fails the whole read with
+                 * EMSGSIZE when the object does not fit (uicc/card0 is ~1.2 KB),
+                 * so the buffer must hold the full object */
+                char buf[PPS_BUF_SIZE];
                 ssize_t bytes = read(pfds[i].fd, buf, sizeof(buf) - 1);
                 (void)bytes;
             }
@@ -652,7 +647,8 @@ static void *detailed_pps_monitor_thread(void *arg)
 
     for (int i = 0; i < FD_COUNT; i++)
     {
-        close(pfds[i].fd);
+        if (pfds[i].fd >= 0)
+            close(pfds[i].fd);
     }
 
     return NULL;

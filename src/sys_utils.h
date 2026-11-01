@@ -45,4 +45,10 @@ int write_file(const char *path, const char *content, mode_t mode);
 int append_file(const char *path, const char *content);
 int mkdir_p(const char *path, mode_t mode);
 
+/* PPS attribute access (flat attributes; use pps_decoder_t for JSON values) */
+#define PPS_BUF_SIZE 16384
+int value_has_token(const char *value, const char *token);
+int pps_read_attr(const char *path, const char *attr, char *out, size_t len);
+int pps_attr_has_token(const char *path, const char *attr, const char *token);
+
 #endif /* SYS_UTILS_H */
